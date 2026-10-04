@@ -1,5 +1,5 @@
 // Меняйте версию при каждом обновлении сайта, чтобы телефон подтянул новые файлы
-const CACHE = 'workout-tracker-v1';
+const CACHE = 'workout-tracker-v2';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

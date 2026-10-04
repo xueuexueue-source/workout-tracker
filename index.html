@@ -189,6 +189,35 @@ h3 { margin: 26px 0 0; font-size: 13px; text-transform: uppercase; letter-spacin
   background: var(--surface-2); color: var(--muted); font-size: 16px;
 }
 .icon-btn:disabled { opacity: .3; }
+.icon-btn { display: grid; place-items: center; }
+.icon-btn svg { width: 18px; height: 18px; }
+.tip {
+  display: block; width: 100%; margin-top: 10px; padding: 10px 12px; min-height: 44px;
+  border-radius: 12px; background: var(--accent-dim); border: 1px dashed rgba(198, 244, 50, .4);
+  color: var(--accent); font-size: 14px; font-weight: 600; text-align: left;
+}
+.tip small { display: block; color: var(--muted); font-weight: 500; font-size: 12px; margin-top: 2px; }
+
+/* ---------- stats ---------- */
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.tile { padding: 10px 12px; background: var(--surface-2); border-radius: 12px; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.tile .v { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.tile .v small { font-size: 12px; font-weight: 600; color: var(--muted); }
+.chart { display: block; width: 100%; height: auto; margin-top: 14px; touch-action: manipulation; }
+.chart text { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .pt { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+.chart .hit { fill: transparent; cursor: pointer; }
+.chart-cap { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.picked { margin-top: 8px; padding: 10px 12px; background: var(--surface-2); border-radius: 12px; font-size: 14px; font-variant-numeric: tabular-nums; }
+.picked b { color: var(--accent); }
+.s-list { margin: 14px 0 0; padding: 0; list-style: none; font-size: 14px; font-variant-numeric: tabular-nums; }
+.s-list li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.s-list .dt { color: var(--muted); white-space: nowrap; }
+.s-list .rec { color: var(--accent); font-weight: 700; }
 .card.list { padding: 6px 16px; }
 select, .input {
   width: 100%; min-height: 46px; padding: 0 12px;
@@ -319,6 +348,11 @@ nav button[aria-current="page"] { color: var(--accent); }
   </form>
 </dialog>
 
+<dialog id="stats">
+  <div id="stats-body"></div>
+  <button class="secondary" data-act="stats-close" style="margin-top:16px">Закрыть</button>
+</dialog>
+
 <input type="file" id="import-file" accept="application/json,.json" hidden>
 <div id="toast" role="status"></div>
 
@@ -327,6 +361,7 @@ const KEY = 'workout-tracker.v1';
 const EQUIP = { barbell: 'Штанга', dumbbell: 'Гантели', plate: 'Блин' };
 const OPTIONS = { free: ['barbell', 'dumbbell'], plate: ['plate', 'dumbbell'] };
 const KIND_LABEL = { machine: 'Тренажёр', body: 'Свой вес' };
+const CHART_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-6 4 3 7-9"/></svg>';
 const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 
 function defaultProgram() {
@@ -404,6 +439,38 @@ function lastEntry(exId, equipment) {
   return null;
 }
 
+// Все сессии упражнения с данным снарядом, от старых к новым
+function exHistory(exId, equipment) {
+  return state.sessions
+    .map((s) => ({ date: s.date, entry: s.entries.find((x) => x.exId === exId && (x.equipment ?? null) === equipment) }))
+    .filter((x) => x.entry)
+    .reverse();
+}
+
+/* ---------- подсказка прогрессии ---------- */
+const STEP = { barbell: 2.5, dumbbell: 1, plate: 2.5 };
+function repRange(reps) {
+  const m = String(reps).match(/\d+/g) || [];
+  return { lo: +m[0] || 0, hi: +(m[1] ?? m[0]) || 0 };
+}
+// Двойная прогрессия: все подходы на верхней границе повторов → пора прибавлять
+function suggestion(ex, entry) {
+  const last = lastEntry(ex.id, entry.equipment)?.entry;
+  const { hi } = repRange(ex.reps);
+  if (!last || !hi || last.sets.length < ex.sets || !last.sets.every((s) => s.r >= hi)) return null;
+  const head = `В прошлый раз все подходы по ${hi}`;
+  if (ex.kind === 'body') return { text: 'Пора усложнять', sub: `${head} — добавь повторов или возьми отягощение` };
+  const top = Math.max(...last.sets.map((s) => +s.w || 0));
+  if (!top) return { text: 'Пора прибавить вес', sub: head };
+  if (ex.kind === 'machine') {
+    if (entry.sets.every((s) => s.done || +s.w > top)) return null;
+    return { text: 'Пора прибавить вес', sub: `${head} × ${top} кг — ставь следующий шаг тренажёра` };
+  }
+  const w = top + STEP[entry.equipment];
+  if (entry.sets.every((s) => s.done || +s.w >= w)) return null;
+  return { text: `Пора прибавить: ${w} ${unit(ex.kind, entry.equipment)}`, sub: `${head} × ${top} — нажми, чтобы подставить`, w };
+}
+
 /* ---------- draft (текущая тренировка) ---------- */
 function fillSets(ex, entry) {
   const last = lastEntry(ex.id, entry.equipment)?.entry;
@@ -457,6 +524,7 @@ function viewWorkout() {
     const complete = e.sets.length > 0 && e.sets.every((s) => s.done);
     const last = lastEntry(ex.id, e.equipment);
     const body = ex.kind === 'body';
+    const tip = suggestion(ex, e);
     return `
     <section class="card${complete ? ' complete' : ''}" data-ex="${esc(ex.id)}">
       <div class="card-head">
@@ -468,11 +536,13 @@ function viewWorkout() {
             ${opts ? '' : `<span class="chip ghost">${KIND_LABEL[ex.kind]}</span>`}
           </div>
         </div>
+        <button class="icon-btn" data-act="stats" aria-label="Прогресс: ${esc(ex.name)}">${CHART_SVG}</button>
       </div>
       ${ex.note ? `<p class="note">${esc(ex.note)}</p>` : ''}
       ${opts ? `<div class="seg small" role="group" aria-label="Снаряд">${opts.map((o) =>
         `<button data-act="equip" data-eq="${o}" aria-pressed="${e.equipment === o}">${eqLabel(ex.kind, o)}</button>`).join('')}</div>` : ''}
       ${last ? `<p class="last">В прошлый раз, ${shortDate(last.date)}: <b>${esc(fmtSets(ex.kind, last.entry.sets))}</b></p>` : ''}
+      ${tip ? `<${tip.w ? `button data-act="bump" data-w="${tip.w}"` : 'p'} class="tip">↑ ${esc(tip.text)}<small>${esc(tip.sub)}</small></${tip.w ? 'button' : 'p'}>` : ''}
       <div class="sets">
         ${e.sets.map((s, i) => `
         <div class="set${s.done ? ' done' : ''}${body ? ' body' : ''}" data-i="${i}">
@@ -553,6 +623,14 @@ function viewSettings() {
           ${[[0, 'Выключен'], [60, '1 мин'], [90, '1,5 мин'], [120, '2 мин'], [180, '3 мин']].map(([v, l]) => `<option value="${v}" ${v === rest ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
       </div>
+      <div class="setting" style="margin-top:12px">
+        <span>Звуковой сигнал</span>
+        <select id="sound-select" aria-label="Звуковой сигнал">
+          <option value="1" ${state.settings.sound !== false ? 'selected' : ''}>Включён</option>
+          <option value="0" ${state.settings.sound === false ? 'selected' : ''}>Выключен</option>
+        </select>
+      </div>
+      <p class="hint">Пока идёт тренировка, экран не гаснет. В беззвучном режиме iPhone сигнал не слышен.</p>
     </section>
     <h3>Данные</h3>
     <section class="card">
@@ -568,6 +646,50 @@ function render() {
   app.innerHTML = views[ui.tab]();
   document.querySelectorAll('nav button').forEach((b) =>
     b.dataset.tab === ui.tab ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
+  syncWakeLock();
+}
+
+/* ---------- экран не гаснет, пока идёт тренировка ---------- */
+let wakeLock = null, wakePending = false;
+async function syncWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  const want = ui.tab === 'workout' && !document.hidden && dayProgress(getDay(ui.dayId)).done > 0;
+  if (want && !wakeLock && !wakePending) {
+    wakePending = true;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch {}
+    wakePending = false;
+  } else if (!want && wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+}
+
+/* ---------- звук ---------- */
+let audioCtx = null;
+// Вызывается из обработчика нажатия: iOS разрешает звук только после жеста
+function primeAudio() {
+  if (state.settings.sound === false) return;
+  try {
+    audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch {}
+}
+function beep() {
+  if (state.settings.sound === false || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  [[0, 880], [0.22, 880], [0.44, 1175]].forEach(([d, f]) => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t + d);
+    g.gain.exponentialRampToValueAtTime(0.3, t + d + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.18);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t + d);
+    o.stop(t + d + 0.2);
+  });
 }
 
 /* ---------- toast ---------- */
@@ -590,6 +712,7 @@ function drawRest() {
     restEl.classList.add('over');
     $('.time', restEl).textContent = 'Пора!';
     navigator.vibrate?.([200, 100, 200]);
+    beep();
     setTimeout(() => { if (!restTick) restEl.hidden = true; }, 4000);
     return;
   }
@@ -597,6 +720,7 @@ function drawRest() {
 }
 function startRest(seconds) {
   if (!seconds) return;
+  primeAudio();
   restEnd = Date.now() + seconds * 1000;
   restEl.hidden = false;
   restEl.classList.remove('over');
@@ -605,7 +729,10 @@ function startRest(seconds) {
   drawRest();
 }
 function stopRest() { clearInterval(restTick); restTick = null; restEl.hidden = true; }
-document.addEventListener('visibilitychange', () => { if (!document.hidden && restTick) drawRest(); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && restTick) drawRest();
+  syncWakeLock();
+});
 
 /* ---------- actions ---------- */
 function finishWorkout() {
@@ -651,6 +778,14 @@ const actions = {
     }
     save(); render();
   },
+  bump(el, ctx) {
+    for (const s of ctx.entry.sets) if (!s.done) s.w = el.dataset.w;
+    save(); render();
+  },
+  stats(el, ctx) { openStats(ctx.day.id, ctx.ex.id, ctx.entry.equipment); },
+  'stats-eq'(el) { statsUi.equipment = el.dataset.eq; statsUi.sel = null; renderStats(); },
+  'stats-pt'(el) { statsUi.sel = +el.dataset.i; renderStats(); },
+  'stats-close'() { statsDlg.close(); },
   'set-add'(el, ctx) {
     const prev = ctx.entry.sets[ctx.entry.sets.length - 1];
     ctx.entry.sets.push({ w: prev ? prev.w : '', r: '', ph: prev ? (prev.r || prev.ph) : '', done: false });
@@ -732,6 +867,7 @@ app.addEventListener('input', (ev) => {
 app.addEventListener('focusin', (ev) => { if (ev.target.matches('input[data-f]')) ev.target.select(); });
 app.addEventListener('change', (ev) => {
   if (ev.target.id === 'rest-select') { state.settings.rest = +ev.target.value; save(); }
+  if (ev.target.id === 'sound-select') { state.settings.sound = ev.target.value === '1'; save(); }
 });
 
 /* ---------- exercise editor ---------- */
@@ -784,6 +920,75 @@ edForm.addEventListener('submit', () => {
   }
   save(); render();
 });
+
+/* ---------- прогресс по упражнению ---------- */
+const statsDlg = $('#stats');
+let statsUi = null;
+function openStats(dayId, exId, equipment) {
+  statsUi = { dayId, exId, equipment, sel: null };
+  renderStats();
+  statsDlg.showModal();
+}
+const fmtNum = (v) => String(Math.round(v * 10) / 10);
+function chartSvg(pts, sel) {
+  const W = 320, H = 170, L = 34, R = 12, T = 14, B = 24;
+  const vals = pts.map((p) => p.v);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  let lo = min, hi = max;
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const pad = (hi - lo) * 0.18;
+  lo -= pad; hi += pad;
+  const x = (i) => (pts.length === 1 ? (L + W - R) / 2 : L + ((W - L - R) * i) / (pts.length - 1));
+  const y = (v) => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  const ticks = min === max ? [min] : [min, (min + max) / 2, max];
+  return `
+  <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="График прогресса">
+    ${ticks.map((t) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text x="${L - 6}" y="${y(t) + 3}" text-anchor="end">${fmtNum(t)}</text>`).join('')}
+    <text x="${L}" y="${H - 6}">${shortDate(pts[0].date)}</text>
+    ${pts.length > 1 ? `<text x="${W - R}" y="${H - 6}" text-anchor="end">${shortDate(pts[pts.length - 1].date)}</text>` : ''}
+    <line class="cross" x1="${x(sel)}" x2="${x(sel)}" y1="${T}" y2="${H - B}"/>
+    ${pts.length > 1 ? `<polyline class="line" points="${pts.map((p, i) => `${x(i)},${y(p.v)}`).join(' ')}"/>` : ''}
+    ${pts.map((p, i) => `<circle class="pt" cx="${x(i)}" cy="${y(p.v)}" r="${i === sel ? 6 : 4}"/>`).join('')}
+    ${pts.map((p, i) => `<circle class="hit" data-act="stats-pt" data-i="${i}" cx="${x(i)}" cy="${y(p.v)}" r="${Math.max(8, Math.min(18, (W - L - R) / pts.length / 2))}"/>`).join('')}
+  </svg>`;
+}
+function renderStats() {
+  const day = getDay(statsUi.dayId);
+  const ex = getEx(day, statsUi.exId);
+  const opts = OPTIONS[ex.kind];
+  const hist = exHistory(ex.id, statsUi.equipment).slice(-30);
+  // Есть вес — рисуем лучший вес за тренировку, иначе лучший подход по повторам
+  const byWeight = ex.kind !== 'body' && hist.some((h) => h.entry.sets.some((s) => +s.w > 0));
+  const u = byWeight ? unit(ex.kind, statsUi.equipment) : 'повт';
+  const pts = hist.map((h) => ({
+    date: h.date, sets: h.entry.sets,
+    v: Math.max(...h.entry.sets.map((s) => (byWeight ? +s.w || 0 : +s.r || 0))),
+  }));
+  const seg = opts ? `<div class="seg small" role="group" aria-label="Снаряд">${opts.map((o) =>
+    `<button data-act="stats-eq" data-eq="${o}" aria-pressed="${statsUi.equipment === o}">${eqLabel(ex.kind, o)}</button>`).join('')}</div>` : '';
+  let body;
+  if (!pts.length) {
+    body = `<p class="hint" style="margin-top:16px">Пока нет данных${opts ? ' для этого снаряда' : ''}. График появится после первой завершённой тренировки.</p>`;
+  } else {
+    const best = Math.max(...pts.map((p) => p.v));
+    const sel = statsUi.sel ?? pts.length - 1;
+    const p = pts[sel];
+    const delta = pts.length > 1 ? pts[pts.length - 1].v - pts[0].v : 0;
+    body = `
+    <div class="tiles">
+      <div class="tile"><div class="k">Рекорд</div><div class="v">${fmtNum(best)} <small>${u}</small></div></div>
+      <div class="tile"><div class="k">С начала</div><div class="v">${delta > 0 ? '+' : ''}${fmtNum(delta)} <small>${u}</small></div></div>
+      <div class="tile"><div class="k">Тренировок</div><div class="v">${pts.length}</div></div>
+    </div>
+    ${chartSvg(pts, sel)}
+    <div class="chart-cap">${byWeight ? `Лучший вес за тренировку, ${u}` : 'Лучший подход за тренировку, повторы'} · нажмите на точку</div>
+    <div class="picked">${new Date(p.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}: <b>${esc(fmtSets(ex.kind, p.sets))}</b></div>
+    <ul class="s-list">
+      ${pts.slice(-8).reverse().map((q) => `<li><span class="dt">${shortDate(q.date)}</span><span${q.v === best ? ' class="rec"' : ''}>${esc(fmtSets(ex.kind, q.sets))}</span></li>`).join('')}
+    </ul>`;
+  }
+  $('#stats-body').innerHTML = `<h2>${esc(ex.name)}</h2>${seg}${body}`;
+}
 
 /* ---------- backup ---------- */
 async function exportData() {
