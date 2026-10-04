@@ -214,6 +214,19 @@ dialog label.field { display: flex; margin-top: 0; }
 dialog label.field > * { margin-top: 0; }
 dialog .check { font-size: 22px; color: var(--muted); }
 
+/* ---------- итог тренировки ---------- */
+.sum-list { margin: 14px 0 0; padding: 0; list-style: none; }
+.sum-list li { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 10px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.sum-list .n { font-weight: 600; overflow-wrap: anywhere; }
+.sum-list .s { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sum-list .r { text-align: right; white-space: nowrap; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sum-list .r.up { color: var(--accent); }
+.sum-list .r.same, .sum-list .r.new { color: var(--muted); font-weight: 600; }
+.sum-list .rec { display: inline-block; margin-top: 2px; padding: 1px 8px; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 800; }
+.status { margin: 0; font-size: 14px; }
+.status.err { color: var(--danger); }
+a { color: var(--accent); }
+
 /* ---------- calendar ---------- */
 .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .cal .wd { text-align: center; color: var(--muted); font-size: 11px; padding-bottom: 2px; }
@@ -379,6 +392,18 @@ nav button[aria-current="page"] { color: var(--accent); }
       <label id="ed-eq-wrap">По умолчанию<select name="equipment"></select></label>
       <label id="ed-w-wrap">Стартовый вес, кг<input class="input" name="weight" inputmode="decimal" autocomplete="off"></label>
     </div>
+    <label>Отдых после подхода
+      <select name="rest">
+        <option value="">Как в настройках</option>
+        <option value="45">45 сек</option>
+        <option value="60">1 мин</option>
+        <option value="90">1,5 мин</option>
+        <option value="120">2 мин</option>
+        <option value="150">2,5 мин</option>
+        <option value="180">3 мин</option>
+        <option value="240">4 мин</option>
+      </select>
+    </label>
     <label>Заметка<textarea class="input" name="note" maxlength="200"></textarea></label>
     <div class="dlg-actions">
       <button type="button" class="secondary" data-act="ed-cancel">Отмена</button>
@@ -395,6 +420,11 @@ nav button[aria-current="page"] { color: var(--accent); }
     <button type="button" class="secondary" data-act="se-cancel">Отмена</button>
     <button type="button" class="primary" data-act="se-save">Сохранить</button>
   </div>
+</dialog>
+
+<dialog id="summary">
+  <div id="summary-body"></div>
+  <button type="button" class="primary" data-act="summary-close">Готово</button>
 </dialog>
 
 <dialog id="stats">
@@ -415,9 +445,14 @@ const STALE_MS = 6 * 3600e3; // тренировка, начатая раньш�
 const CHART_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-6 4 3 7-9"/></svg>';
 const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 
+// Отдых по умолчанию: тяжёлые базовые — дольше, мелкие мышцы и пресс — короче
+const REST_DEFAULTS = {
+  squat: 150, bench: 120, row: 120, ohp: 120, 'wrist-curl': 60, crunch: 60, 'leg-raise': 60,
+  'leg-press': 150, 'lat-pulldown': 120, 'incline-press': 120, 'lateral-raise': 60, 'wrist-ext': 60, twist: 60,
+};
 function defaultProgram() {
   const ex = (id, name, reps, kind, extra = {}) =>
-    ({ id, name, sets: 3, reps, kind, equipment: OPTIONS[kind] ? OPTIONS[kind][0] : null, weight: '', note: '', ...extra });
+    ({ id, name, sets: 3, reps, kind, equipment: OPTIONS[kind] ? OPTIONS[kind][0] : null, weight: '', note: '', rest: REST_DEFAULTS[id] || null, ...extra });
   return { days: [
     { id: 'wed', name: 'Среда', weekday: 3, exercises: [
       ex('squat', 'Приседания', '8-10', 'free'),
@@ -452,6 +487,8 @@ function load() {
   return { program: defaultProgram(), sessions: [], draft: {}, settings: {} };
 }
 let state = load();
+// Программы, сохранённые до появления отдельного отдыха, получают значения по умолчанию
+for (const d of state.program.days) for (const ex of d.exercises) if (ex.rest === undefined) ex.rest = REST_DEFAULTS[ex.id] || null;
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); }
   catch { toast('Не удалось сохранить данные'); }
@@ -551,6 +588,23 @@ function suggestion(ex, entry) {
     sub: `3 тренировки на ${top} ${u} без роста повторов. Убери ${fmtNum(top - w)} ${u} и набирай заново — нажми, чтобы подставить`,
     w, down: true,
   };
+}
+
+// Цель на подход: тот же вес — на повтор больше, чем в прошлый раз; вес вырос — нижняя граница; вес снижен — верхняя
+function targetReps(ex, entry, i) {
+  const { lo, hi } = repRange(ex.reps);
+  const last = lastEntry(ex.id, entry.equipment)?.entry;
+  if (!last) return lo || '';
+  const ls = last.sets[i] || last.sets[last.sets.length - 1];
+  const prev = +ls.r || 0;
+  if (ex.kind !== 'body') {
+    const w = +entry.sets[i].w || 0, lw = +ls.w || 0;
+    if (w > lw) return lo || prev;
+    if (w < lw) return hi || prev;
+  }
+  if (!hi) return prev;
+  if (prev >= hi) return ex.kind === 'body' ? prev + 1 : hi;
+  return prev + 1;
 }
 
 /* ---------- время тренировки ---------- */
@@ -677,7 +731,7 @@ function viewWorkout() {
         <div class="set${s.done ? ' done' : ''}${body ? ' body' : ''}" data-i="${i}">
           <span class="set-n">${i + 1}</span>
           ${body ? '' : `<label class="field"><input data-f="w" inputmode="decimal" autocomplete="off" value="${esc(s.w)}" placeholder="0" aria-label="Вес"><span>${unit(ex.kind, e.equipment)}</span></label><span class="x">×</span>`}
-          <label class="field"><input data-f="r" inputmode="numeric" autocomplete="off" value="${esc(s.r)}" placeholder="${esc(s.ph)}" aria-label="Повторы"><span>повт</span></label>
+          <label class="field"><input data-f="r" inputmode="numeric" autocomplete="off" value="${esc(s.r)}" placeholder="${esc(targetReps(ex, e, i))}" aria-label="Повторы, цель"><span>повт</span></label>
           <button class="check" data-act="check" aria-pressed="${s.done}" aria-label="Подход ${i + 1} выполнен">${CHECK_SVG}</button>
         </div>`).join('')}
       </div>
@@ -834,7 +888,7 @@ function viewSettings() {
       <div class="row" data-ex="${esc(ex.id)}">
         <button class="row-main" data-act="ex-edit">
           <div class="t">${esc(ex.name)}</div>
-          <div class="d">${ex.sets}×${esc(ex.reps)} · ${OPTIONS[ex.kind] ? OPTIONS[ex.kind].map((o) => eqLabel(ex.kind, o).toLowerCase()).join(' / ') : KIND_LABEL[ex.kind].toLowerCase()}</div>
+          <div class="d">${ex.sets}×${esc(ex.reps)} · ${OPTIONS[ex.kind] ? OPTIONS[ex.kind].map((o) => eqLabel(ex.kind, o).toLowerCase()).join(' / ') : KIND_LABEL[ex.kind].toLowerCase()}${ex.rest ? ` · отдых ${fmtDur(ex.rest)}` : ''}</div>
         </button>
         <button class="icon-btn" data-act="ex-up" aria-label="Выше" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button class="icon-btn" data-act="ex-down" aria-label="Ниже" ${i === d.exercises.length - 1 ? 'disabled' : ''}>↓</button>
@@ -849,7 +903,7 @@ function viewSettings() {
     <h3>Отдых между подходами</h3>
     <section class="card">
       <div class="setting">
-        <span>Таймер</span>
+        <span>Отдых по умолчанию</span>
         <select id="rest-select" aria-label="Таймер отдыха">
           ${[[0, 'Выключен'], [60, '1 мин'], [90, '1,5 мин'], [120, '2 мин'], [180, '3 мин']].map(([v, l]) => `<option value="${v}" ${v === rest ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
@@ -861,7 +915,20 @@ function viewSettings() {
           <option value="0" ${state.settings.sound === false ? 'selected' : ''}>Выключен</option>
         </select>
       </div>
-      <p class="hint">Пока идёт тренировка, экран не гаснет. В беззвучном режиме iPhone сигнал не слышен.</p>
+      <p class="hint">Свой отдых для упражнения задаётся в его настройках выше. Пока идёт тренировка, экран не гаснет. В беззвучном режиме iPhone сигнал не слышен.</p>
+    </section>
+    <h3>Автокопия в GitHub</h3>
+    <section class="card">
+      ${gist ? `
+      <p class="status${gist.error ? ' err' : ''}">${gist.error ? esc(gist.error) : 'Подключено'}${gist.syncedAt ? ` · последняя копия ${new Date(gist.syncedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}` : ''}</p>
+      <p class="hint">Копия сама сохраняется в секретный Gist после каждой тренировки и правки. Без сети — при следующем открытии.</p>
+      <button class="secondary" data-act="gist-sync">Сохранить сейчас</button>
+      <button class="secondary" data-act="gist-restore">Восстановить из Gist</button>
+      <button class="secondary danger" data-act="gist-off">Отключить</button>` : `
+      <p class="hint" style="margin-top:0">После каждой тренировки копия будет сама сохраняться в секретный Gist вашего аккаунта GitHub.</p>
+      <p class="hint">1. <a href="https://github.com/settings/tokens/new?scopes=gist&description=workout-tracker" target="_blank" rel="noopener">Создайте токен</a> с единственным доступом «gist».<br>2. Вставьте его сюда. Токен хранится только на этом устройстве и в копию не попадает.</p>
+      <input class="input" id="gist-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Токен GitHub" aria-label="Токен GitHub" style="margin-top:10px">
+      <button class="secondary" data-act="gist-connect">Подключить</button>`}
     </section>
     <h3>Данные</h3>
     <section class="card">
@@ -967,6 +1034,49 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* ---------- actions ---------- */
+// Сравнение упражнения с прошлым разом (вызывается до сохранения новой тренировки)
+function compareEntry(e) {
+  const hist = exHistory(e.exId, e.equipment ?? null).map((h) => h.entry);
+  const prev = hist[hist.length - 1];
+  if (!prev) return { dir: 'new', text: 'первая запись' };
+  const byWeight = e.kind !== 'body' && e.sets.some((x) => +x.w > 0);
+  const top = (x) => Math.max(...x.sets.map((q) => +q.w || 0));
+  const reps = (x) => x.sets.reduce((a, q) => a + (+q.r || 0), 0);
+  const bestSet = (x) => Math.max(...x.sets.map((q) => +q.r || 0));
+  const metric = byWeight ? top : bestSet;
+  const record = metric(e) > Math.max(...hist.map(metric));
+  if (byWeight && top(e) !== top(prev)) {
+    const d = top(e) - top(prev);
+    return { dir: d > 0 ? 'up' : 'down', text: `${d > 0 ? '↑ +' : '↓ −'}${fmtNum(Math.abs(d))} кг`, record };
+  }
+  // сделано меньше подходов, чем в прошлый раз — сравниваем только общие
+  const k = Math.min(e.sets.length, prev.sets.length);
+  const d = reps({ sets: e.sets.slice(0, k) }) - reps({ sets: prev.sets.slice(0, k) });
+  if (!d) return { dir: 'same', text: '= как в прошлый раз', record };
+  return { dir: d > 0 ? 'up' : 'down', text: `${d > 0 ? '↑ +' : '↓ −'}${Math.abs(d)} повт.`, record };
+}
+function showSummary(session, cmp) {
+  const setCount = session.entries.reduce((a, e) => a + e.sets.length, 0);
+  const up = cmp.filter((c) => c.dir === 'up').length;
+  const records = cmp.filter((c) => c.record).length;
+  $('#summary-body').innerHTML = `
+    <h2>Тренировка завершена 💪</h2>
+    <div class="tiles" style="margin-top:0">
+      <div class="tile"><div class="k">Время</div><div class="v">${session.duration ? fmtDur(session.duration) : '—'}</div></div>
+      <div class="tile"><div class="k">Подходов</div><div class="v">${setCount}</div></div>
+      <div class="tile"><div class="k">Лучше</div><div class="v">${up} <small>из ${cmp.length}</small></div></div>
+    </div>
+    ${records ? `<p class="hint">Новых рекордов: ${records}</p>` : ''}
+    <ul class="sum-list">
+      ${session.entries.map((e, i) => `<li>
+        <div><div class="n">${esc(e.name)}</div><div class="s">${esc(fmtSets(e.kind, e.sets))}</div></div>
+        <div class="r ${cmp[i].dir}">${cmp[i].text}${cmp[i].record ? '<br><span class="rec">рекорд</span>' : ''}</div>
+      </li>`).join('')}
+    </ul>
+    <p class="hint">Сравнение с прошлой тренировкой на том же снаряде.</p>`;
+  $('#summary').showModal();
+}
+
 function finishWorkout() {
   const day = getDay(ui.dayId);
   const d = state.draft[day.id];
@@ -988,11 +1098,13 @@ function finishWorkout() {
   if (!entries.length) { toast('Отметьте хотя бы один подход'); return; }
   const { done, total } = dayProgress(day);
   if (done < total && !confirm(`Выполнено ${done} из ${total} подходов. Завершить тренировку?`)) return;
-  state.sessions.unshift({
+  const cmp = entries.map(compareEntry);
+  const session = {
     id: uid(), date: new Date().toISOString(), dayId: day.id, dayName: day.name, entries,
     duration: d.startedAt && lastT > d.startedAt ? Math.round((lastT - d.startedAt) / 1000) : null,
     note: (d.note || '').trim(),
-  });
+  };
+  state.sessions.unshift(session);
   delete state.draft[day.id];
   save();
   stopRest();
@@ -1000,7 +1112,8 @@ function finishWorkout() {
   ui.histView = 'log';
   render();
   scrollTo(0, 0);
-  toast('Тренировка сохранена 💪');
+  showSummary(session, cmp);
+  queueGist();
 }
 
 // Черновики без отметок пересобираются, чтобы подхватить исправленную историю
@@ -1020,9 +1133,10 @@ const actions = {
     save(); render();
   },
   check(el, ctx) {
-    const s = ctx.entry.sets[+el.closest('.set').dataset.i];
+    const i = +el.closest('.set').dataset.i;
+    const s = ctx.entry.sets[i];
     if (!s.done) {
-      if (s.r === '') s.r = s.ph;
+      if (s.r === '') s.r = targetReps(ctx.ex, ctx.entry, i);
       if (s.r === '') { toast('Введите число повторов'); return; }
       s.done = true;
       s.t = Date.now();
@@ -1030,7 +1144,7 @@ const actions = {
       if (!draftStart(ctx.day)) d.startedAt = s.t;
       navigator.vibrate?.(15);
       const { done, total } = dayProgress(ctx.day);
-      if (done < total) startRest(restSeconds());
+      if (done < total) startRest(restSeconds() ? ctx.ex.rest || restSeconds() : 0);
     } else {
       s.done = false;
     }
@@ -1079,6 +1193,14 @@ const actions = {
     renderSessEdit();
   },
   'se-cancel'() { sessDlg.close(); },
+  'summary-close'() { $('#summary').close(); },
+  'gist-connect'() { gistConnect(); },
+  'gist-sync'() { syncGist(false); },
+  'gist-restore'() { gistRestore(true); },
+  'gist-off'() {
+    if (!confirm('Отключить автокопию? Токен будет удалён с этого устройства, сам Gist останется в GitHub.')) return;
+    gist = null; saveGist(); render();
+  },
   'se-save'() {
     const entries = sessEdit.entries
       .map((e) => ({ ...e, sets: e.sets.map((x) => ({ w: num(x.w), r: num(x.r) })).filter((x) => x.r !== '') }))
@@ -1088,7 +1210,7 @@ const actions = {
     target.entries = entries;
     target.note = (sessEdit.note || '').trim();
     pruneDrafts();
-    save(); sessDlg.close(); render();
+    save(); sessDlg.close(); render(); queueGist();
     toast('Тренировка обновлена');
   },
   bump(el, ctx) {
@@ -1118,7 +1240,7 @@ const actions = {
     const id = el.closest('[data-session]').dataset.session;
     state.sessions = state.sessions.filter((s) => s.id !== id);
     pruneDrafts();
-    save(); render();
+    save(); render(); queueGist();
   },
   'ex-edit'(el) { openEditor(el.closest('[data-day]').dataset.day, el.closest('[data-ex]').dataset.ex); },
   'ex-add'(el) { openEditor(el.closest('[data-day]').dataset.day, null); },
@@ -1181,8 +1303,11 @@ app.addEventListener('input', (ev) => {
   if (!input) return;
   const day = getDay(ui.dayId);
   const ex = getEx(day, input.closest('.card').dataset.ex);
-  const s = entryFor(day, ex).sets[+input.closest('.set').dataset.i];
-  s[input.dataset.f] = input.value.trim().replace(',', '.');
+  const entry = entryFor(day, ex);
+  const row = input.closest('.set');
+  entry.sets[+row.dataset.i][input.dataset.f] = input.value.trim().replace(',', '.');
+  // вес изменился — пересчитать цель по повторам
+  if (input.dataset.f === 'w') row.querySelector('input[data-f="r"]').placeholder = targetReps(ex, entry, +row.dataset.i);
   save();
 });
 app.addEventListener('focusin', (ev) => { if (ev.target.matches('input[data-f]')) ev.target.select(); });
@@ -1218,6 +1343,7 @@ function openEditor(dayId, exId) {
   if (ex.equipment) edForm.equipment.value = ex.equipment;
   edForm.weight.value = ex.weight ?? '';
   edForm.note.value = ex.note || '';
+  edForm.rest.value = ex.rest || '';
   editor.showModal();
 }
 edForm.addEventListener('submit', () => {
@@ -1231,6 +1357,7 @@ edForm.addEventListener('submit', () => {
     equipment: OPTIONS[kind] ? edForm.equipment.value : null,
     weight: kind === 'body' ? '' : num(edForm.weight.value),
     note: edForm.note.value.trim(),
+    rest: +edForm.rest.value || null,
   };
   if (editing.exId) {
     Object.assign(getEx(day, editing.exId), data);
@@ -1239,7 +1366,7 @@ edForm.addEventListener('submit', () => {
   } else {
     day.exercises.push({ id: uid(), ...data });
   }
-  save(); render();
+  save(); render(); queueGist();
 });
 
 /* ---------- прогресс по упражнению ---------- */
@@ -1360,7 +1487,105 @@ sessDlg.addEventListener('input', (ev) => {
   sessEdit.entries[+row.dataset.ei].sets[+row.dataset.si][ev.target.dataset.f] = ev.target.value.trim().replace(',', '.');
 });
 
-/* ---------- backup ---------- *//* ---------- backup ---------- */
+/* ---------- автокопия в GitHub Gist ---------- */
+// Токен лежит отдельно от данных, чтобы не попасть ни в файл копии, ни в сам Gist
+const GIST_KEY = 'workout-tracker.gist', GIST_FILE = 'workout-tracker-backup.json';
+let gist = (() => { try { return JSON.parse(localStorage.getItem(GIST_KEY)) || null; } catch { return null; } })();
+let gistBusy = false;
+function saveGist() {
+  try { gist ? localStorage.setItem(GIST_KEY, JSON.stringify(gist)) : localStorage.removeItem(GIST_KEY); } catch {}
+}
+const backupJson = () => JSON.stringify({ program: state.program, sessions: state.sessions, settings: state.settings, savedAt: new Date().toISOString() }, null, 2);
+async function gh(path, opts = {}) {
+  const res = await fetch('https://api.github.com' + path, {
+    ...opts,
+    headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${gist.token}`, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
+  if (!res.ok) throw Object.assign(new Error('GitHub ' + res.status), { status: res.status });
+  return res.json();
+}
+const gistErrorText = (e) => (e.status === 401 ? 'Токен не подходит или истёк' : e.status === 403 || e.status === 404 ? 'У токена нет доступа к Gist' : e.status ? `Ошибка GitHub ${e.status}` : 'Нет сети — копия сохранится позже');
+function validBackup(data) {
+  return data && data.program && Array.isArray(data.program.days) && data.program.days.length && Array.isArray(data.sessions);
+}
+function applyBackup(data) {
+  state = { program: data.program, sessions: data.sessions, settings: data.settings || {}, draft: {} };
+  for (const d of state.program.days) for (const ex of d.exercises) if (ex.rest === undefined) ex.rest = REST_DEFAULTS[ex.id] || null;
+  ui.dayId = nearestDayId();
+  save(); render();
+}
+async function syncGist(silent = true) {
+  if (!gist || gistBusy) return;
+  gistBusy = true;
+  try {
+    const body = JSON.stringify({ description: 'Workout tracker backup', public: false, files: { [GIST_FILE]: { content: backupJson() } } });
+    if (gist.id) {
+      try { await gh('/gists/' + gist.id, { method: 'PATCH', body }); }
+      catch (e) { if (e.status === 404) gist.id = null; else throw e; }
+    }
+    if (!gist.id) gist.id = (await gh('/gists', { method: 'POST', body })).id;
+    Object.assign(gist, { dirty: false, error: null, syncedAt: Date.now() });
+    state.settings.lastBackup = Date.now();
+    delete state.settings.backupSnooze;
+    save();
+    if (!silent) toast('Копия сохранена в Gist');
+  } catch (e) {
+    Object.assign(gist, { dirty: true, error: gistErrorText(e) });
+    if (!silent) toast(gist.error);
+  }
+  saveGist();
+  gistBusy = false;
+  if (ui.tab !== 'workout') render();
+}
+function queueGist() {
+  if (!gist) return;
+  gist.dirty = true;
+  saveGist();
+  syncGist();
+}
+async function gistFetch() {
+  const g = await gh('/gists/' + gist.id);
+  const f = g.files[GIST_FILE];
+  if (!f) return null;
+  const data = JSON.parse(f.truncated ? await (await fetch(f.raw_url)).text() : f.content);
+  return validBackup(data) ? data : null;
+}
+async function gistRestore(manual) {
+  try {
+    const data = gist.id ? await gistFetch() : null;
+    if (!data) { if (manual) toast('В Gist пока нет копии'); return false; }
+    const when = data.savedAt ? new Date(data.savedAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '';
+    if (!manual && data.sessions.length <= state.sessions.length) return false;
+    if (!confirm(`В Gist есть копия${when ? ' от ' + when : ''}: тренировок — ${data.sessions.length} (на этом устройстве — ${state.sessions.length}). Заменить данные на этом устройстве?`)) return false;
+    applyBackup(data);
+    toast('Данные восстановлены из Gist');
+    return true;
+  } catch (e) {
+    toast(gistErrorText(e));
+    return false;
+  }
+}
+async function gistConnect() {
+  const token = $('#gist-token').value.trim();
+  if (!token) { toast('Вставьте токен'); return; }
+  gist = { token, id: null };
+  try {
+    // уже есть копия с другого устройства или прошлого подключения?
+    const found = (await gh('/gists?per_page=100')).find((g) => g.files && g.files[GIST_FILE]);
+    if (found) gist.id = found.id;
+  } catch (e) {
+    toast(gistErrorText(e));
+    gist = null;
+    return;
+  }
+  saveGist();
+  const restored = gist.id ? await gistRestore(false) : false;
+  if (!restored) await syncGist(false);
+  render();
+}
+addEventListener('online', () => { if (gist?.dirty) syncGist(); });
+
+/* ---------- backup ---------- */
 async function exportData() {
   const name = `workouts-${new Date().toISOString().slice(0, 10)}.json`;
   const json = JSON.stringify({ program: state.program, sessions: state.sessions, settings: state.settings }, null, 2);
@@ -1387,11 +1612,10 @@ $('#import-file').addEventListener('change', async (ev) => {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
-    if (!data.program || !Array.isArray(data.program.days) || !data.program.days.length || !Array.isArray(data.sessions)) throw new Error();
+    if (!validBackup(data)) throw new Error();
     if (!confirm(`В копии ${data.sessions.length} тренировок. Заменить текущие данные?`)) return;
-    state = { program: data.program, sessions: data.sessions, settings: data.settings || {}, draft: {} };
-    ui.dayId = nearestDayId();
-    save(); render();
+    applyBackup(data);
+    queueGist();
     toast('Данные восстановлены');
   } catch {
     toast('Не удалось прочитать файл');
@@ -1408,6 +1632,7 @@ setInterval(() => {
 
 /* ---------- start ---------- */
 render();
+if (gist?.dirty) syncGist();
 navigator.storage?.persist?.();
 if ('serviceWorker' in navigator) {
   addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
